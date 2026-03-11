@@ -316,26 +316,68 @@ with open(path, 'rb') as f:
     model_data = pickle.load(f)
 
 model        = model_data['model']
-feature_names = model_data['features_names']
-encoder_col  = model_data['encoder_col']
+feature_names = model_data['features']
+encoder_col  = model_data['encoder']
+scaler       = model_data['scaler']
+
+# Feature engineering function (same as in notebook)
+def create_tenure_group(tenure):
+    if tenure <= 12:
+        return '0-12'
+    elif tenure <= 24:
+        return '13-24'
+    elif tenure <= 48:
+        return '25-48'
+    else:
+        return '49-72'
+
+def create_features(input_df):
+    """Create engineered features same as training"""
+    df = input_df.copy()
+    
+    df['tenure_group'] = df['tenure'].apply(create_tenure_group)
+    
+    df['total_services'] = 0
+    df['total_services'] += (df['PhoneService'] == 'Yes').astype(int)
+    df['total_services'] += (df['MultipleLines'] == 'Yes').astype(int)
+    df['total_services'] += (df['InternetService'] != 'No').astype(int)
+    for col in ['OnlineSecurity', 'OnlineBackup', 'DeviceProtection', 'TechSupport', 'StreamingTV', 'StreamingMovies']:
+        df['total_services'] += (df[col] == 'Yes').astype(int)
+    
+    df['has_any_security'] = ((df['OnlineSecurity'] == 'Yes') | (df['TechSupport'] == 'Yes')).astype(int)
+    df['has_any_backup'] = ((df['OnlineBackup'] == 'Yes') | (df['DeviceProtection'] == 'Yes')).astype(int)
+    df['is_long_term'] = (df['Contract'].isin(['One year', 'Two year'])).astype(int)
+    
+    df['avg_monthly_charges'] = df['TotalCharges'] / (df['tenure'] + 1)
+    df['charges_per_service'] = df['MonthlyCharges'] / (df['total_services'] + 1)
+    df['paperless_electronic'] = ((df['PaperlessBilling'] == 'Yes') & (df['PaymentMethod'] == 'Electronic check')).astype(int)
+    df['tenure_monthly_interaction'] = df['tenure'] * df['MonthlyCharges']
+    
+    return df
 
 def prediction(input_data):
     input_df = pd.DataFrame([input_data])
-
+    
+    input_df = create_features(input_df)
+    
     for column in encoder_col.keys():
         if column in input_df.columns:
             try:
                 input_df[column] = encoder_col[column].transform(input_df[column])
-            except ValueError:
-                st.error(f"Unknown category detected in column: {column}")
+            except ValueError as e:
+                st.error(f"Error encoding column {column}: {e}")
                 return
-
-    input_df = input_df.reindex(columns=feature_names)
-    numeric_cols = ['tenure', 'MonthlyCharges', 'TotalCharges']
-    input_df[numeric_cols] = input_df[numeric_cols].astype(float)
-
-    pred       = model.predict(input_df)[0]
-    pred_proba = model.predict_proba(input_df)[0][1]
+    
+    for col in feature_names:
+        if col not in input_df.columns:
+            input_df[col] = 0
+    
+    input_df = input_df[feature_names]
+    
+    input_scaled = scaler.transform(input_df)
+    
+    pred       = model.predict(input_scaled)[0]
+    pred_proba = model.predict_proba(input_scaled)[0][1]
 
     if pred == 1:
         st.markdown("""
@@ -377,7 +419,7 @@ def main():
         SeniorCitizen = st.selectbox('Senior Citizen', ('No', 'Yes'))
         SeniorCitizen = 1 if SeniorCitizen == 'Yes' else 0
     with col3:
-        tenure        = st.number_input('Tenure (Months)', min_value=0)
+        tenure        = st.number_input('Tenure (Months)', min_value=0, max_value=72)
 
     col4, col5 = st.columns(2)
     with col4:
@@ -415,8 +457,13 @@ def main():
     with col11:
         MonthlyCharges = st.number_input('Monthly Charges ($)', min_value=0.0, format="%.2f")
     with col12:
-        TotalCharges   = st.number_input('Total Charges ($)', min_value=0.0, format="%.2f")
+        # TotalCharges is calculated automatically from tenure and MonthlyCharges
+        # TotalCharges = tenure * MonthlyCharges (approximation)
+        st.markdown('<div style="padding: 0.5rem; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px;"><p style="margin:0; color: var(--text-secondary); font-size: 0.7rem;">Total Charges ($)</p><p style="margin:0; color: var(--text-primary); font-size: 1rem;">Auto-calculated</p></div>', unsafe_allow_html=True)
 
+    # Calculate TotalCharges automatically from tenure and MonthlyCharges
+    TotalCharges = tenure * MonthlyCharges
+    
     input_data = {
         'gender': gender, 'SeniorCitizen': SeniorCitizen,
         'Partner': Partner, 'Dependents': Dependents, 'tenure': tenure,
@@ -432,18 +479,8 @@ def main():
     if st.button('🔮  Run Prediction'):
 
         if MonthlyCharges <= 0:
-            st.error("Monthly Charges must be greater than 0.")
+            st.error("Monthly charges must be greater than 0.")
             return
-
-        if TotalCharges <= 0:
-            st.error("Total Charges must be greater than 0.")
-            return
-
-        if tenure > 0 and TotalCharges < MonthlyCharges:
-            st.warning(
-                "Total charges seem inconsistent with tenure and monthly charges. "
-                "Please verify the values."
-            )
 
         prediction(input_data)
 
